@@ -131,3 +131,6 @@ response = requests.get('https://gb.ru/posts/about-neural-network')
 soup = bs4.BeautifulSoup(response.text, 'lxml')
 tag_info = soup.find_all("a", attrs={"class": "small"})
 print(tag_info)
+
+
+##################
