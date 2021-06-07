@@ -13,54 +13,50 @@
 import requests
 from urllib.parse import urljoin
 import bs4
-import datetime
 import time
 import pymongo
 
-# 1. Взять стартовую ссылку, получить всю необходимую информацию из первой статьи, сложить в базу данных,
-# перейти к следующей статье.
-# 2. Получить список страниц.
-# 3. Изменить стартовую ссылку на первую страницу в списке страниц. Получить всю необходимую информцию из первой
-# статьи на странице, сложить в базу данных, перейти к следующей странице.
-
 
 class GbBlogParser:
-
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
     }
 
-    def __init__(self, start_url):
+    __parse_time = 0
+
+    def __init__(self, start_url, db, delay=1.0):
         self.start_url = start_url
-        self.pagination_list = []
-        self.data = {}
+        self.delay = delay
+        self.db = db
+        self.done_url = set()
+        self.tasks = []
+        self.task_list({self.start_url, }, self.parse_pagination)
 
     def _get_response(self, url):
-        response = requests.get(url, headers=self.headers)
-        print(f"RESPONSE: {response.url}")
-        return response
+        while True:
+            next_apply_time = self.__parse_time + self.delay
+            if next_apply_time > time.time():
+                time.sleep(next_apply_time - time.time())
+            response = requests.get(url, headers=self.headers)
+            self.__parse_time = time.time()
+            if response.ok:
+                return response
 
-    def _get_soup(self, response):
+    def _get_comment_info(self, commentable_id):
+        comment_url = f"api/v2/comments?commentable_type=Post&commentable_id={commentable_id}&order=desc"
+        comment_response = self._get_response(urljoin(self.start_url, comment_url))
+        comment_info = comment_response.json()
+        return comment_info
+
+    def parse_post(self, response):
         soup = bs4.BeautifulSoup(response.text, "lxml")
-        return soup
-
-    def _get_comment_info(self):
-        comment_url = response.url
-        comment_response = self._get_response(comment_url)
-        comment_soup = self._get_soup(comment_response)
-
-
-
-    def parse_post(self, soup):
-        posts = soup.find("div", attrs={"class": "post-items-wrapper"})
         author_name_tag = soup.find("div", itemprop="author")
 
         data = {
             "post_data": {
-            "url": response.url,
-            "title": soup.find("h1", attrs={"class": "blogpost-title"}).text,
-            "image": soup.find("img", attrs={"class": "col-md-12"}).attrs.get('src'),
-            "post_date": soup.find("div", attrs={"class": "small m-t-xs"}).text,
+                "url": response.url,
+                "title": soup.find("h1", attrs={"class": "blogpost-title"}).text,
+                "post_date": soup.find("time", attrs={"class": "text-md text-muted m-r-md"}).text,
             },
             "author_data": {
                 "url": urljoin(response.url, author_name_tag.parent.attrs.get("href")),
@@ -71,66 +67,60 @@ class GbBlogParser:
                  "url": urljoin(response.url, tag.attrs.get("href"))
                  }
                 for tag in soup.find_all("a", attrs={"class": "small"})
-            ]
-
-
-
+            ],
+            "comments_info": self._get_comment_info(soup.find("comments").attrs.get("commentable-id")),
         }
         self._save(data)
 
+    def parse_pagination(self, response):
+        soup = bs4.BeautifulSoup(response.text, "lxml")
+
+        pagination = soup.find("ul", attrs={"class": "gb__pagination"})
+        self.task_list(
+            {
+                urljoin(response.url, a_tag.attrs["href"])
+                for a_tag in pagination.find_all("a")
+                if a_tag.attrs.get("href")
+            },
+            self.parse_pagination,
+        )
+        post_wrapper = soup.find("div", attrs={"class": "post-items-wrapper"})
+        self.task_list(
+            {
+                urljoin(response.url, a_tag.attrs["href"])
+                for a_tag in post_wrapper.find_all("a", attrs={"class": "post-item__title"})
+                if a_tag.attrs.get("href")
+            },
+            self.parse_post,
+        )
+
+    def task_list(self, urls, callback):
+        urls_set = urls - self.done_url
+        for url in urls_set:
+            self.tasks.append(self.get_task(url, callback))
+            self.done_url.add(url)
+
+    def get_task(self, url, callback):
+        def task():
+            response = self._get_response(url)
+            return callback(response)
+
+        return task
+
+    def run(self):
+        while True:
+            try:
+                task = self.tasks.pop(0)
+                task()
+            except IndexError:
+                break
+
+    def _save(self, data):
+        collection = self.db["Data_mining_HW2"]["GB_blogs_collection"]
+        collection.insert_one(data)
 
 
-
-
-    def _get_response(self):
-        pass
-
-
-# if __name__ == '__main__':
-#    parser = GbBlogParser('https://gb.ru/posts')
-#     parser.run()
-
-
-url = 'https://gb.ru/posts'
-response = requests.get(url)
-soup = bs4.BeautifulSoup(response.text, 'lxml')
-
-# Получаем пагинацию
-
-pagination = soup.find("ul", attrs={"class": "gb__pagination"})
-pagination_list = []
-for a_tag in pagination.find_all("a"):
-    if a_tag.attrs.get("href"):
-        pagination_list.append(a_tag.attrs.get("href")) #Удалить последний?
-
-print(pagination_list)
-
-# Получаем статьи на странице
-
-
-
-headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-    }
-# Функция которая собирает статьи со страницы и переходит на следующую:
-
-# ef get_posts_from_page(pagination_list):
-page_url = urljoin(url, pagination_list.pop(0))
-response = requests.get(page_url, headers=headers)
-print(page_url)
-
-
-image = soup.find("img", attrs={"class": "col-md-12"}).attrs.get('src')
-print(image)
-
-post_date = soup.find("div", attrs={"class": "small m-t-xs"}).text
-# post_date = datetime.date(post_date) Подумать потом
-print(post_date)
-
-response = requests.get('https://gb.ru/posts/about-neural-network')
-soup = bs4.BeautifulSoup(response.text, 'lxml')
-tag_info = soup.find_all("a", attrs={"class": "small"})
-print(tag_info)
-
-
-##################
+if __name__ == "__main__":
+    db_client = pymongo.MongoClient("mongodb://localhost:27017")
+    parser = GbBlogParser("https://gb.ru/posts", db_client, 0.5)
+    parser.run()
